@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>แบบประเมินด้วยมือ</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/handpose"></script>
+    <style>
+        body { text-align: center; font-family: Arial, sans-serif; }
+        video { border: 2px solid black; }
+        #question-box { font-size: 24px; margin: 20px; }
+        #score-box { font-size: 20px; color: blue; margin-top: 10px; }
+        #result-box { font-size: 20px; font-weight: bold; color: green; }
+        .progress-container { width: 100%; height: 20px; background: #ddd; margin-top: 20px; }
+        .progress-bar { height: 100%; width: 0%; background: #76c7c0; transition: width 0.1s linear; }
+        #answers-box { margin-top: 20px; font-size: 18px; }
+        #restart-button { margin-top: 20px; padding: 10px 20px; font-size: 16px; cursor: pointer; background: #ff6666; color: white; border: none; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <h1>แบบประเมินด้วยการยกนิ้ว</h1>
+    <video id="video" width="640" height="480" autoplay></video>
+    <canvas id="canvas" width="640" height="480"></canvas>
+    <p id="question-box">กำลังโหลดคำถาม...</p>
+    <p id="score-box">คะแนนที่เลือก: -</p>
+    <div class="progress-container">
+        <div class="progress-bar" id="progress-bar"></div>
+    </div>
+    <p id="result-box"></p>
+    <div id="answers-box"></div>
+    <button id="restart-button" onclick="restartQuiz()">เริ่มใหม่</button>
+
+    <script>
+        const questions = [
+            "1. คุณพึงพอใจกับการบริการของเราแค่ไหน?",
+            "2. คุณคิดว่าเว็บนี้ใช้งานง่ายหรือไม่?",
+            "3. คุณพอใจกับคุณภาพของสินค้าแค่ไหน?",
+            "4. คุณจะแนะนำบริการนี้ให้เพื่อนหรือไม่?",
+            "5. ความเร็วในการให้บริการเป็นอย่างไร?"
+        ];
+
+        let currentQuestion = 0;
+        let answers = [];
+        let selectedAnswer = null;
+        let lastDetected = null;
+        let confirmFrames = 0;
+        let progressBar = document.getElementById("progress-bar");
+        let interval;
+        let detectedHand = false; 
+
+        async function runHandTracking() {
+            const video = document.getElementById("video");
+            const canvas = document.getElementById("canvas");
+            const ctx = canvas.getContext("2d");
+
+            navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
+                video.srcObject = stream;
+            });
+
+            const model = await handpose.load();
+            document.getElementById("question-box").innerText = questions[currentQuestion];
+
+            async function detect() {
+                const predictions = await model.estimateHands(video);
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                detectedHand = predictions.length > 0;
+
+                if (detectedHand) {
+                    const landmarks = predictions[0].landmarks;
+                    drawHand(ctx, landmarks);
+                    
+                    let answer = detectFingers(landmarks);
+
+                    if (answer !== null) {
+                        if (answer === lastDetected) {
+                            confirmFrames++;
+                        } else {
+                            confirmFrames = 0;
+                        }
+                        lastDetected = answer;
+
+                        if (confirmFrames > 10) {
+                            selectedAnswer = answer;
+                            document.getElementById("score-box").innerText = `คะแนนที่เลือก: ${answer}`;
+                        }
+                    }
+                }
+
+                requestAnimationFrame(detect);
+            }
+
+            detect();
+        }
+
+        function drawHand(ctx, landmarks) {
+            ctx.strokeStyle = "red";
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            for (let i = 0; i < landmarks.length; i++) {
+                const [x, y] = landmarks[i];
+                ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        }
+
+        function detectFingers(landmarks) {
+            let fingers = [
+                landmarks[8][1] < landmarks[6][1], 
+                landmarks[12][1] < landmarks[10][1], 
+                landmarks[16][1] < landmarks[14][1], 
+                landmarks[20][1] < landmarks[18][1]
+            ];
+            let thumb = landmarks[4][1] < landmarks[3][1];
+
+            let count = fingers.filter(Boolean).length + (thumb ? 1 : 0);
+            return count >= 1 && count <= 5 ? count : null;
+        }
+
+        function startProgress() {
+            let width = 0;
+            interval = setInterval(() => {
+                width += 1;
+                progressBar.style.width = width + "%";
+                
+                if (width >= 100) {
+                    clearInterval(interval);
+                    handleNextQuestion();
+                }
+            }, 200); // 20 วินาที = 100 / 200 * 20s
+        }
+
+        function handleNextQuestion() {
+            if (!detectedHand) {
+                // ถ้าไม่พบมือ ไม่เปลี่ยนข้อ
+                progressBar.style.width = "0%";
+                startProgress();
+                return;
+            }
+
+            answers.push(selectedAnswer || 1); // ถ้ายังไม่เลือก ให้ค่าเป็น 1
+            currentQuestion++;
+            selectedAnswer = null;
+            confirmFrames = 0;
+
+            if (currentQuestion < questions.length) {
+                document.getElementById("question-box").innerText = questions[currentQuestion];
+                document.getElementById("score-box").innerText = "คะแนนที่เลือก: -";
+                progressBar.style.width = "0%";
+                startProgress();
+            } else {
+                showResults();
+            }
+        }
+
+        function showResults() {
+            let score = answers.reduce((sum, val) => sum + val, 0);
+            let avg = (score / questions.length).toFixed(2);
+            document.getElementById("question-box").innerText = "สรุปผลคะแนน:";
+            document.getElementById("result-box").innerText = `คะแนนรวม: ${score} | ค่าเฉลี่ย: ${avg}`;
+            
+            let answerText = answers.map((a, i) => `ข้อ ${i + 1}: ${a} คะแนน`).join("<br>");
+            document.getElementById("answers-box").innerHTML = answerText;
+
+            google.script.run.saveSurveyResults(answers, score, avg);
+        }
+
+        function restartQuiz() {
+            currentQuestion = 0;
+            answers = [];
+            selectedAnswer = null;
+            confirmFrames = 0;
+            document.getElementById("answers-box").innerHTML = "";
+            document.getElementById("question-box").innerText = questions[currentQuestion];
+            document.getElementById("score-box").innerText = "คะแนนที่เลือก: -";
+            document.getElementById("result-box").innerText = "";
+            progressBar.style.width = "0%";
+            startProgress();
+        }
+
+        runHandTracking();
+        startProgress();
+    </script>
+</body>
+</html>
